@@ -1,0 +1,13 @@
+{application, saturn_internal,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  saturn_groups_manager
+                 ]},
+  {mod, { saturn_internal_app, []}},
+  {env, []}
+ ]}.
