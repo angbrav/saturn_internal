@@ -27,20 +27,18 @@ start_internal(Port, MyId) ->
                     {saturn_internal_serv, start_link, [Nodes, MyId]},
                     permanent, 5000, worker, [saturn_internal_serv]}),
 
-    supervisor:start_child(?MODULE, {saturn_tcp_recv_fsm,
-                    {saturn_tcp_recv_fsm, start_link, [Port, saturn_internal_serv]},
-                    permanent, 5000, worker, [saturn_tcp_recv_fsm]}),
+    supervisor:start_child(?MODULE, {saturn_internal_tcp_recv_fsm,
+                    {saturn_internal_tcp_recv_fsm, start_link, [Port, saturn_internal_serv]},
+                    permanent, 5000, worker, [saturn_internal_tcp_recv_fsm]}),
 
-    supervisor:start_child(?MODULE, {tcp_connection_handler_fsm_sup,
-                    {tcp_connection_handler_fsm_sup, start_link, []},
-                    permanent, 5000, supervisor, [tcp_connection_handler_fsm_sup]}),
+    supervisor:start_child(?MODULE, {saturn_internal_tcp_connection_handler_fsm_sup,
+                    {saturn_internal_tcp_connection_handler_fsm_sup, start_link, []},
+                    permanent, 5000, supervisor, [saturn_internal_tcp_connection_handler_fsm_sup]}),
     
 
     {ok, List} = inet:getif(),
     {Ip, _, _} = hd(List),
     Host = inet_parse:ntoa(Ip),
-
-    lager:info("saturn_internal started"),
 
     {ok, {Host, Port}}.
 
