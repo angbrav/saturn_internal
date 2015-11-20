@@ -65,7 +65,7 @@ handle_call({new_stream, Stream, IdSender}, _From, S0=#state{queues=Queues0, myi
                                     Stream = queue:to_list(Queue0),
                                     case groups_manager_serv:get_hostport(Node) of
                                         {ok, {Host, Port}} ->
-                                            propagation_fsm_sup:start_fsm(Port, Host, {stream, Stream, MyId}),
+                                            saturn_internal_propagation_fsm_sup:start_fsm([Port, Host, {new_stream, Stream, MyId}]),
                                             dict:store(Node, queue:new(), Acc);
                                         {error, no_host} ->
                                             Acc

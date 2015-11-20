@@ -33,7 +33,11 @@ start_internal(Port, MyId) ->
 
     supervisor:start_child(?MODULE, {saturn_internal_tcp_connection_handler_fsm_sup,
                     {saturn_internal_tcp_connection_handler_fsm_sup, start_link, []},
-                    permanent, 5000, supervisor, [saturn_internal_tcp_connection_handler_fsm_sup]}),
+                   permanent, 5000, supervisor, [saturn_internal_tcp_connection_handler_fsm_sup]}),
+
+    supervisor:start_child(?MODULE, {saturn_internal_propagation_fsm_sup,
+                    {saturn_internal_propagation_fsm_sup, start_link, []},
+                    permanent, 5000, supervisor, [saturn_internal_propagation_fsm_sup]}),
     
 
     {ok, List} = inet:getif(),
