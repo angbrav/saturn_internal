@@ -24,6 +24,13 @@
                 delay,
                 myid}).
 
+-record(label, {operation :: remote_read | update | remote_reply,
+                key,
+                timestamp :: non_neg_integer(),
+                node,
+                sender :: non_neg_integer(),
+                payload}).
+
 %% ------------------------------------------------------------------
 %% API Function Definitions
 %% ------------------------------------------------------------------
@@ -64,7 +71,7 @@ handle_call({delayed_delivery_completed, Node, Number}, _From, S0=#state{queues=
 handle_call({new_stream, Stream, IdSender}, _From, S0=#state{queues=Queues0}) ->
     Now = now_milisec(),
     Queues1 = lists:foldl(fun(Label, Acc0) ->
-                            {Key, _Clock, _Node} = Label,
+                            Key = Label#label.key,
                             lists:foldl(fun(Node, Acc1) ->
                                             case Node of
                                                 IdSender ->
