@@ -25,7 +25,7 @@
                 myid}).
 
 -record(label, {operation :: remote_read | update | remote_reply,
-                key,
+                bkey,
                 timestamp :: non_neg_integer(),
                 node,
                 sender :: non_neg_integer(),
@@ -54,30 +54,33 @@ init([Nodes, MyId]) ->
     {ok, #state{queues=Queues, myid=MyId, busy=Busy, delay=100}}.
 
 handle_call({delayed_delivery_completed, Node, Number}, _From, S0=#state{queues=Queues0, busy=Busy0}) ->
+    Busy1 = dict:store(Node, false, Busy0),
+    S1 = S0#state{busy=Busy1},
     Queue0 = dict:fetch(Node, Queues0),
     List0 = queue:to_list(Queue0),
     Length = length(List0),
     case Length == Number of
         true ->
-            List1 = [];
+            List1 = [],
+            Queue1 = queue:from_list(List1),
+            Queues1 = dict:store(Node, Queue1, Queues0),
+            S2 = S1#state{queues=Queues1};
         false ->
-            List1 = lists:sublist(List0, Number + 1, Length - Number)
+            List1 = lists:sublist(List0, Number + 1, Length - Number),
+            S2 = delivery_round(List1, Node, S0)
     end,
-    Queue1 = queue:from_list(List1),
-    Queues1 = dict:store(Node, Queue1, Queues0),
-    Busy1 = dict:store(Node, false, Busy0),
-    {noreply, S0#state{queues=Queues1, busy=Busy1}};
+    {noreply, S2};
     
 handle_call({new_stream, Stream, IdSender}, _From, S0=#state{queues=Queues0}) ->
     Now = now_milisec(),
     Queues1 = lists:foldl(fun(Label, Acc0) ->
-                            Key = Label#label.key,
+                            BKey = Label#label.bkey,
                             lists:foldl(fun(Node, Acc1) ->
                                             case Node of
                                                 IdSender ->
                                                     Acc1;
                                                 _ ->
-                                                    case groups_manager_serv:interested(Node, Key) of
+                                                    case groups_manager_serv:interested(Node, BKey) of
                                                         {ok, true} ->
                                                             Queue0 = dict:fetch(Node, Acc1),
                                                             Queue1 = queue:in({Label, Now}, Queue0),
