@@ -6,3 +6,4 @@
                 payload}).
 
 -define(PROPAGATION_MODE, naive_erlang).
+%-define(PROPAGATION_MODE, short_tcp).
