@@ -1,6 +1,7 @@
 -module(saturn_internal_serv).
 -behaviour(gen_server).
--define(SERVER, ?MODULE).
+
+-include("saturn_internal.hrl").
 
 %% ------------------------------------------------------------------
 %% API Function Exports
@@ -9,6 +10,7 @@
 -export([start_link/2]).
 
 -export([handle/1,
+         handle/2,
          delayed_delivery_completed/2,
          deliver_delayed/4]).
 
@@ -24,22 +26,25 @@
                 delay,
                 myid}).
 
--record(label, {operation :: remote_read | update | remote_reply,
-                bkey,
-                timestamp :: non_neg_integer(),
-                node,
-                sender :: non_neg_integer(),
-                payload}).
-
 %% ------------------------------------------------------------------
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
+reg_name(MyId) ->  list_to_atom(integer_to_list(MyId) ++ atom_to_list(?MODULE)).
+
 start_link(Nodes, MyId) ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [Nodes, MyId], []).
+    case ?PROPAGATION_MODE of
+        naive_erlang ->
+            gen_server:start_link({global, reg_name(MyId)}, ?MODULE, [Nodes, MyId], []);
+        _ ->
+            gen_server:start_link({local, ?MODULE}, ?MODULE, [Nodes, MyId], [])
+    end.
 
 handle(Message) ->
     gen_server:call(?MODULE, Message, infinity).
+
+handle(MyId, Message) ->
+    gen_server:call({global, reg_name(MyId)}, Message, infinity).
 
 delayed_delivery_completed(Node, Number) ->
     gen_server:call(?MODULE, {delayed_delivery_completed, Node, Number}).
@@ -51,7 +56,7 @@ init([Nodes, MyId]) ->
     {Queues, Busy} = lists:foldl(fun(Node,{Queues0, Busy0}) ->
                                     {dict:store(Node, queue:new(), Queues0), dict:store(Node, false, Busy0)}
                                  end, {dict:new(), dict:new()}, Nodes),
-    {ok, #state{queues=Queues, myid=MyId, busy=Busy, delay=100}}.
+    {ok, #state{queues=Queues, myid=MyId, busy=Busy, delay=0}}.
 
 handle_call({delayed_delivery_completed, Node, Number}, _From, S0=#state{queues=Queues0, busy=Busy0}) ->
     Busy1 = dict:store(Node, false, Busy0),
@@ -137,15 +142,10 @@ delivery_round(Stream, Node, S0=#state{delay=Delay, queues=Queues0, myid=MyId, b
             Busy1 = dict:store(Node, true, Busy0),
             S0#state{queues=Queues1, busy=Busy1};
         {FinalStream, Rest} ->
-            case groups_manager_serv:get_hostport(Node) of
-                {ok, {Host, Port}} ->
-                    saturn_internal_propagation_fsm_sup:start_fsm([Port, Host, {new_stream, FinalStream, MyId}]);
-                {error, no_host} ->
-                    lager:error("no_host when trying to propagate")
-            end,
+            propagate_stream(Node, FinalStream, MyId),
             delivery_round(Rest, Node, S0)
     end.
-    
+
 deliver_delayed(Node, MyId, Stream, When) ->
     Now = now_milisec(),
     Delay = (When - Now),
@@ -155,13 +155,27 @@ deliver_delayed(Node, MyId, Stream, When) ->
         false ->
             noop
     end,
-    case groups_manager_serv:get_hostport(Node) of
-        {ok, {Host, Port}} ->
-            saturn_internal_propagation_fsm_sup:start_fsm([Port, Host, {new_stream, Stream, MyId}]);
-        {error, no_host} ->
-            lager:error("no_host when trying to propagate")
-    end,
+    propagate_stream(Node, Stream, MyId),
     saturn_internal_serv:delayed_delivery_completed(Node, length(Stream)).
+
+propagate_stream(Node, Stream, MyId) ->
+    case ?PROPAGATION_MODE of
+        naive_erlang ->
+            case groups_manager_serv:is_leaf(Node) of
+                {ok, true} ->
+                    ServerName = list_to_atom(integer_to_list(Node) ++ atom_to_list(saturn_leaf_converger)),
+                    gen_server:call({global, ServerName}, {new_stream, Stream, MyId}, infinity);
+                {ok, false} ->
+                    saturn_internal_serv:handle(Node, {new_stream, Stream, MyId})
+            end;
+        short_tcp ->
+            case groups_manager_serv:get_hostport(Node) of
+                {ok, {Host, Port}} ->
+                    saturn_internal_propagation_fsm_sup:start_fsm([Port, Host, {new_stream, Stream, MyId}]);
+                {error, no_host} ->
+                    lager:error("no_host when trying to propagate")
+            end
+    end.
 
 get_delayable([], _Time, Delayable) ->
     Delayable;

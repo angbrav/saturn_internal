@@ -2,6 +2,8 @@
 
 -behaviour(supervisor).
 
+-include("saturn_internal.hrl").
+
 %% API
 -export([start_link/0,
          start_internal/2]).
@@ -26,19 +28,23 @@ start_internal(Port, MyId) ->
     supervisor:start_child(?MODULE, {saturn_internal_serv,
                     {saturn_internal_serv, start_link, [Nodes, MyId]},
                     permanent, 5000, worker, [saturn_internal_serv]}),
-
-    supervisor:start_child(?MODULE, {saturn_internal_tcp_recv_fsm,
-                    {saturn_internal_tcp_recv_fsm, start_link, [Port, saturn_internal_serv]},
-                    permanent, 5000, worker, [saturn_internal_tcp_recv_fsm]}),
-
-    supervisor:start_child(?MODULE, {saturn_internal_tcp_connection_handler_fsm_sup,
-                    {saturn_internal_tcp_connection_handler_fsm_sup, start_link, []},
-                   permanent, 5000, supervisor, [saturn_internal_tcp_connection_handler_fsm_sup]}),
-
-    supervisor:start_child(?MODULE, {saturn_internal_propagation_fsm_sup,
-                    {saturn_internal_propagation_fsm_sup, start_link, []},
-                    permanent, 5000, supervisor, [saturn_internal_propagation_fsm_sup]}),
     
+    case ?PROPAGATION_MODE of
+        short_tcp ->
+            supervisor:start_child(?MODULE, {saturn_internal_tcp_recv_fsm,
+                                            {saturn_internal_tcp_recv_fsm, start_link, [Port, saturn_internal_serv]},
+                                            permanent, 5000, worker, [saturn_internal_tcp_recv_fsm]}),
+
+            supervisor:start_child(?MODULE, {saturn_internal_tcp_connection_handler_fsm_sup,
+                                            {saturn_internal_tcp_connection_handler_fsm_sup, start_link, []},
+                                            permanent, 5000, supervisor, [saturn_internal_tcp_connection_handler_fsm_sup]}),
+
+            supervisor:start_child(?MODULE, {saturn_internal_propagation_fsm_sup,
+                                            {saturn_internal_propagation_fsm_sup, start_link, []},
+                                            permanent, 5000, supervisor, [saturn_internal_propagation_fsm_sup]});
+        _ ->
+            noop
+    end,
 
     {ok, List} = inet:getif(),
     {Ip, _, _} = hd(List),
