@@ -10,9 +10,7 @@
 -export([start_link/2]).
 
 -export([handle/1,
-         handle/2,
-         delayed_delivery_completed/2,
-         deliver_delayed/4]).
+         handle/2]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -23,7 +21,7 @@
 
 -record(state, {queues :: dict(),
                 busy :: dict(),
-                delay,
+                delay, %has to be in microsecs
                 myid}).
 
 %% ------------------------------------------------------------------
@@ -46,38 +44,18 @@ handle(Message) ->
 handle(MyId, Message) ->
     gen_server:call({global, reg_name(MyId)}, Message, infinity).
 
-delayed_delivery_completed(Node, Number) ->
-    gen_server:call(?MODULE, {delayed_delivery_completed, Node, Number}).
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
 init([Nodes, MyId]) ->
+    lager:info("Internal started: ~p", [MyId]),
     {Queues, Busy} = lists:foldl(fun(Node,{Queues0, Busy0}) ->
                                     {dict:store(Node, queue:new(), Queues0), dict:store(Node, false, Busy0)}
                                  end, {dict:new(), dict:new()}, Nodes),
     {ok, #state{queues=Queues, myid=MyId, busy=Busy, delay=0}}.
 
-handle_call({delayed_delivery_completed, Node, Number}, _From, S0=#state{queues=Queues0, busy=Busy0}) ->
-    Busy1 = dict:store(Node, false, Busy0),
-    S1 = S0#state{busy=Busy1},
-    Queue0 = dict:fetch(Node, Queues0),
-    List0 = queue:to_list(Queue0),
-    Length = length(List0),
-    case Length == Number of
-        true ->
-            List1 = [],
-            Queue1 = queue:from_list(List1),
-            Queues1 = dict:store(Node, Queue1, Queues0),
-            S2 = S1#state{queues=Queues1};
-        false ->
-            List1 = lists:sublist(List0, Number + 1, Length - Number),
-            S2 = delivery_round(List1, Node, S0)
-    end,
-    {noreply, S2};
-    
-handle_call({new_stream, Stream, IdSender}, _From, S0=#state{queues=Queues0}) ->
-    Now = now_milisec(),
+handle_call({new_stream, Stream, IdSender}, _From, S0=#state{queues=Queues0, busy=Busy0, delay=Delay, myid=MyId}) ->
     Queues1 = lists:foldl(fun(Label, Acc0) ->
                             BKey = Label#label.bkey,
                             lists:foldl(fun(Node, Acc1) ->
@@ -87,18 +65,32 @@ handle_call({new_stream, Stream, IdSender}, _From, S0=#state{queues=Queues0}) ->
                                                 _ ->
                                                     case groups_manager_serv:interested(Node, BKey) of
                                                         {ok, true} ->
+                                                            case Label#label.operation of
+                                                                update ->
+                                                                    Now = now_microsec(),
+                                                                    Time = Now + Delay;
+                                                                _ ->
+                                                                    Time = 0
+                                                            end,
                                                             Queue0 = dict:fetch(Node, Acc1),
-                                                            Queue1 = queue:in({Label, Now}, Queue0),
+                                                            Queue1 = queue:in({Time, Label}, Queue0),
                                                             dict:store(Node, Queue1, Acc1);
                                                         {ok, false} -> Acc1
                                                     end
                                             end
                                         end, Acc0, dict:fetch_keys(Queues0))
                           end, Queues0, Stream),
-    S1 = lists:foldl(fun(Node, State) ->
-                        deliver_labels(Node, State)
-                     end, S0#state{queues=Queues1}, dict:fetch_keys(Queues1)),
-    {reply, ok, S1};
+    {Queues2, Busy1} = lists:foldl(fun(Node, {Acc1, Acc2}) ->
+                                    case dict:fetch(Node, Busy0) of
+                                        false ->
+                                            {NewQueue, NewPending} = deliver_labels(dict:fetch(Node, Queues1), Node, MyId, []),
+                                            {dict:store(Node, NewQueue, Acc1), dict:store(Node, NewPending, Acc2)};
+                                        true ->
+                                            OldQueue = dict:fetch(Node, Queues1),
+                                            {dict:store(Node, OldQueue, Acc1), dict:store(Node, true, Acc2)}
+                                    end
+                                   end, {dict:new(), dict:new()}, dict:fetch_keys(Queues1)),
+    {reply, ok, S0#state{queues=Queues2, busy=Busy1}};
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -106,7 +98,14 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info(_Info, State) ->
+handle_info({deliver_labels, Node}, S0=#state{queues=Queues0, busy=Busy0, myid=MyId}) ->
+    {NewQueue, NewPending} = deliver_labels(dict:fetch(Node, Queues0), Node, MyId, []),
+    Queues1 = dict:store(Node, NewQueue, Queues0),
+    Busy1 = dict:store(Node, NewPending, Busy0),
+    {noreply, S0#state{queues=Queues1, busy=Busy1}};
+
+handle_info(Info, State) ->
+    lager:info("Weird message: ~p", [Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -118,47 +117,26 @@ code_change(_OldVsn, State, _Extra) ->
 %% ------------------------------------------------------------------
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
-deliver_labels(Node, S0=#state{queues=Queues0, busy=Busy0}) ->
-    Queue0 = dict:fetch(Node, Queues0),
-    case dict:fetch(Node, Busy0) of
-        true ->
-            S0;
-        false ->
-            Stream0 = queue:to_list(Queue0),
-            delivery_round(Stream0, Node, S0)
+deliver_labels(Queue0, Node, MyId, Deliverables0) ->
+    Now = saturn_utilities:now_microsec(),
+    case queue:out(Queue0) of
+        {empty, Queue0} ->
+            propagate_stream(Node, lists:reverse(Deliverables0), MyId),
+            {Queue0, false};
+        {{value, {Time, Label}}, Queue1} when Time =< Now ->
+            deliver_labels(Queue1, Node, MyId, [Label|Deliverables0]);
+        {{value, {Time, _Label}}, _Queue1} ->
+            propagate_stream(Node, lists:reverse(Deliverables0), MyId),
+            NextDelivery = trunc((Time - Now)/1000),
+            erlang:send_after(NextDelivery, self(), {deliver_labels, Node}),
+            {Queue0, true}
     end.
-
-delivery_round(Stream, Node, S0=#state{delay=Delay, queues=Queues0, myid=MyId, busy=Busy0}) ->
-    case filter_labels(Stream, [], Delay) of
-        {[], []} ->
-            Queues1 = dict:store(Node, queue:new(), Queues0),
-            S0#state{queues=Queues1};
-        {[], Rest} ->
-            [First|Tail] = Rest,
-            {Label, Time} = First,
-            Delayable = get_delayable(Tail, Time, [Label]),
-            spawn(saturn_internal_serv, deliver_delayed, [Node, MyId, Delayable, Time + Delay]),
-            Queues1 = dict:store(Node, queue:from_list(Rest), Queues0),
-            Busy1 = dict:store(Node, true, Busy0),
-            S0#state{queues=Queues1, busy=Busy1};
-        {FinalStream, Rest} ->
-            propagate_stream(Node, FinalStream, MyId),
-            delivery_round(Rest, Node, S0)
-    end.
-
-deliver_delayed(Node, MyId, Stream, When) ->
-    Now = now_milisec(),
-    Delay = (When - Now),
-    case Delay > 0 of
-        true ->
-            timer:sleep(trunc(Delay));
-        false ->
-            noop
-    end,
-    propagate_stream(Node, Stream, MyId),
-    saturn_internal_serv:delayed_delivery_completed(Node, length(Stream)).
+               
+propagate_stream(_Node, [], _MyId) ->
+    done;
 
 propagate_stream(Node, Stream, MyId) ->
+    lager:info("Stream to propagate to ~p: ~p", [Node, Stream]),
     case ?PROPAGATION_MODE of
         naive_erlang ->
             case groups_manager_serv:is_leaf(Node) of
@@ -177,35 +155,7 @@ propagate_stream(Node, Stream, MyId) ->
             end
     end.
 
-get_delayable([], _Time, Delayable) ->
-    Delayable;
-    
-get_delayable([H|T], Time, Delayable) ->
-    {LabelNext, TimeNext} = H,
-    case TimeNext=<Time of
-        true ->
-            get_delayable(T, Time, Delayable ++ [LabelNext]);
-        false ->
-            Delayable
-    end.
-
-filter_labels([], Sendable, _Delay) ->
-    {Sendable, []};
-
-filter_labels([Next|Rest], Sendable, Delay) ->
-    Now = now_milisec(),
-    {Label, Time} = Next,
-    case (Time+Delay)>Now of
-        true ->
-            {Sendable, [Next|Rest]};
-        false ->
-            filter_labels(Rest, Sendable ++ [Label], Delay)
-    end.
-
 now_microsec()->
     %% Not very efficient. os:timestamp() faster but non monotonic. Test!
     {MegaSecs, Secs, MicroSecs} = erlang:now(),
     (MegaSecs * 1000000 + Secs) * 1000000 + MicroSecs.
-
-now_milisec() ->
-    now_microsec()/1000.
