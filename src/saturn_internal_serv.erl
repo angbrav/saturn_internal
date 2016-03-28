@@ -21,7 +21,7 @@
 
 -record(state, {queues :: dict(),
                 busy :: dict(),
-                delay, %has to be in microsecs
+                delays, %has to be in microsecs
                 myid}).
 
 %% ------------------------------------------------------------------
@@ -53,9 +53,13 @@ init([Nodes, MyId]) ->
     {Queues, Busy} = lists:foldl(fun(Node,{Queues0, Busy0}) ->
                                     {dict:store(Node, queue:new(), Queues0), dict:store(Node, false, Busy0)}
                                  end, {dict:new(), dict:new()}, Nodes),
-    {ok, #state{queues=Queues, myid=MyId, busy=Busy, delay=0}}.
+    {ok, Delays0} = groups_manager_serv:get_delays_internal(),
+    Delays1 = lists:foldl(fun({Node, Delay}, Dict) ->
+                            dict:store(Node, Delay*1000, Dict)
+                          end, dict:new(), dict:to_list(Delays0)),
+    {ok, #state{queues=Queues, myid=MyId, busy=Busy, delays=Delays1}}.
 
-handle_call({new_stream, Stream, IdSender}, _From, S0=#state{queues=Queues0, busy=Busy0, delay=Delay, myid=MyId}) ->
+handle_call({new_stream, Stream, IdSender}, _From, S0=#state{queues=Queues0, busy=Busy0, delays=Delays, myid=MyId}) ->
     Queues1 = lists:foldl(fun(Label, Acc0) ->
                             BKey = Label#label.bkey,
                             lists:foldl(fun(Node, Acc1) ->
@@ -67,6 +71,7 @@ handle_call({new_stream, Stream, IdSender}, _From, S0=#state{queues=Queues0, bus
                                                         {ok, true} ->
                                                             case Label#label.operation of
                                                                 update ->
+                                                                    Delay = dict:fetch(Node, Delays),
                                                                     Now = now_microsec(),
                                                                     Time = Now + Delay;
                                                                 _ ->
@@ -136,7 +141,7 @@ propagate_stream(_Node, [], _MyId) ->
     done;
 
 propagate_stream(Node, Stream, MyId) ->
-    lager:info("Stream to propagate to ~p: ~p", [Node, Stream]),
+    %lager:info("Stream to propagate to ~p: ~p", [Node, Stream]),
     case ?PROPAGATION_MODE of
         naive_erlang ->
             case groups_manager_serv:is_leaf(Node) of
